@@ -2,6 +2,7 @@ import secrets
 import string
 import json
 import os
+import math
 from json import JSONDecodeError
 
 try:
@@ -29,6 +30,10 @@ SUPPORTED_FORMATS = {
     "scrambled",
 }
 SUPPORTED_REMINDER_DAYS = {30, 60, 90, "off"}
+MIN_SCRAMBLED_LETTERS = 12
+MIN_ESTIMATED_BITS = 64
+MAX_WORD_COUNT = 16
+MAX_CHARACTER_COUNT = 128
 
 
 def _load_json_file(path):
@@ -175,6 +180,70 @@ def get_password_settings():
     return settings
 
 
+def _bounded_count(settings, name, minimum, maximum):
+    """Reject invalid or excessive counts before allocating generated characters."""
+    value = settings[name]
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{name} count must be an integer from {minimum} to {maximum}.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} count must be an integer from {minimum} to {maximum}.") from None
+    if isinstance(value, str) and value.strip() != str(parsed):
+        raise ValueError(f"{name} count must be an integer from {minimum} to {maximum}.")
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"{name} count must be from {minimum} to {maximum}.")
+    settings[name] = parsed
+
+
+def _validate_generator_settings(settings, words=None):
+    """Enforce resource limits and a conservative randomness floor."""
+    _bounded_count(settings, "word_count", 1, MAX_WORD_COUNT)
+    _bounded_count(settings, "numbers_count", 0, MAX_CHARACTER_COUNT)
+    _bounded_count(settings, "symbols_count", 0, MAX_CHARACTER_COUNT)
+    _bounded_count(settings, "letters_count", 1, MAX_CHARACTER_COUNT)
+
+    if settings["format"] == "scrambled":
+        if settings["letters_count"] < MIN_SCRAMBLED_LETTERS:
+            raise ValueError(f"Scrambled passwords require at least {MIN_SCRAMBLED_LETTERS} letters.")
+        return
+
+    if settings["format"] not in SUPPORTED_FORMATS:
+        raise ValueError("Unsupported password format in configuration.")
+    if settings["word_count"] < 2:
+        raise ValueError("Word formats require at least 2 words.")
+    if words is None:
+        raise ValueError("Word list is required for word formats.")
+
+    # Count only choices that remain distinct in the visible password. ASCII
+    # letters keep word tokens separate from digit and punctuation choices;
+    # prefix-free tokens make concatenated word sequences unambiguous.
+    rendered_words = [
+        word.capitalize() if settings["capitalize_words"] else word.lower()
+        for word in words
+    ]
+    if any(not word or any(character not in string.ascii_letters for character in word)
+           for word in rendered_words):
+        raise ValueError("Word list entries must render as ASCII letters only.")
+    if len(set(rendered_words)) != len(rendered_words):
+        raise ValueError("Word list entries must be unique after capitalization.")
+    sorted_words = sorted(rendered_words)
+    if any(right.startswith(left) for left, right in zip(sorted_words, sorted_words[1:])):
+        raise ValueError("Word list entries must be prefix-free to avoid ambiguous passwords.")
+
+    word_bits = math.log2(len(rendered_words))
+    estimated_bits = (
+        settings["word_count"] * word_bits
+        + settings["numbers_count"] * math.log2(10)
+        + settings["symbols_count"] * math.log2(len(string.punctuation))
+    )
+    if estimated_bits < MIN_ESTIMATED_BITS:
+        raise ValueError(
+            f"Word settings are too weak for this word list; at least {MIN_ESTIMATED_BITS} "
+            "bits of estimated randomness are required."
+        )
+
+
 def update_password_settings(new_settings):
     """Validate and save password settings to the preferred config file.
 
@@ -198,22 +267,15 @@ def update_password_settings(new_settings):
         raise ValueError("Unsupported format. Choose word_symbol_word_numbers, word_number_chunks, or scrambled.")
 
     merged["format"] = selected_format
-    merged["word_count"] = _coerce_positive_int(merged.get("word_count"), DEFAULT_PASSWORD_SETTINGS["word_count"])
-    merged["numbers_count"] = _coerce_nonnegative_int(
-        merged.get("numbers_count"), DEFAULT_PASSWORD_SETTINGS["numbers_count"]
-    )
-    merged["symbols_count"] = _coerce_nonnegative_int(
-        merged.get("symbols_count"), DEFAULT_PASSWORD_SETTINGS["symbols_count"]
-    )
-    merged["letters_count"] = _coerce_positive_int(
-        merged.get("letters_count"), DEFAULT_PASSWORD_SETTINGS["letters_count"]
-    )
     merged["capitalize_words"] = bool(merged.get("capitalize_words", True))
     merged["reminder_days"] = _normalize_reminder_days(
         merged.get("reminder_days", DEFAULT_PASSWORD_SETTINGS["reminder_days"])
     )
     if merged["reminder_days"] not in SUPPORTED_REMINDER_DAYS:
         raise ValueError("Reminder setting must be 30, 60, 90, or off.")
+
+    words = load_word_list() if selected_format != "scrambled" else None
+    _validate_generator_settings(merged, words)
 
     config_payload, config_path = _get_preferred_config_for_settings()
     if not isinstance(config_payload, dict):
@@ -267,10 +329,13 @@ def _generate_word_number_chunks(words, settings):
         digits = "".join(str(secrets.randbelow(10)) for _ in range(chunk_size))
         segments.append(word + digits)
 
-    if settings["symbols_count"] > 0:
-        joiner = secrets.choice(string.punctuation)
-        return joiner.join(segments)
-    return "".join(segments)
+    separators = [""] * (word_count - 1)
+    for index in range(settings["symbols_count"]):
+        separators[index % len(separators)] += secrets.choice(string.punctuation)
+    return "".join(
+        segment + (separators[index] if index < len(separators) else "")
+        for index, segment in enumerate(segments)
+    )
 
 
 def _generate_scrambled(settings):
@@ -294,8 +359,9 @@ def generate_password():
     Returns:
         str: The generated password.
     """
-    words = load_word_list()
     settings = get_password_settings()
+    words = load_word_list() if settings["format"] != "scrambled" else None
+    _validate_generator_settings(settings, words)
 
     if settings["format"] == "word_symbol_word_numbers":
         return _generate_word_symbol_word_numbers(words, settings)

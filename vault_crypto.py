@@ -1,9 +1,16 @@
 """Authenticated encryption helpers for the local password vault."""
 
 import base64
+from contextlib import contextmanager
+import errno
 import json
+import math
 import os
 import tempfile
+import time
+
+if os.name == "nt":
+    import msvcrt
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,6 +29,75 @@ AAD = b"password-manager-vault-v1"
 
 class VaultCryptoError(ValueError):
     """Raised when a vault cannot be safely decrypted or validated."""
+
+
+class VaultLockError(VaultCryptoError):
+    """Raised when exclusive access to a vault transaction is unavailable."""
+
+
+@contextmanager
+def vault_transaction_lock(path, timeout=5.0):
+    """Hold a Windows process lock around a complete vault read-modify-write.
+
+    Every cooperating writer must use this context before loading the vault and
+    leave it only after saving. The persistent ``<vault>.lock`` sidecar is never
+    truncated or removed; locking the replaceable vault file would not work.
+    """
+    if os.name != "nt":
+        raise VaultLockError("Vault transaction locking requires Windows.")
+    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("timeout must be a finite non-negative number")
+
+    # Resolve parent aliases while preserving the vault name across os.replace.
+    # A symlink at the vault file would change that identity on replacement.
+    try:
+        absolute_path = os.path.abspath(os.fspath(path))
+        parent = os.path.dirname(absolute_path)
+        os.makedirs(parent, exist_ok=True)
+        if os.path.islink(absolute_path):
+            raise VaultLockError("Vault file aliases are not supported.")
+        canonical_parent = os.path.realpath(parent, strict=True)
+        canonical_path = os.path.normcase(
+            os.path.join(canonical_parent, os.path.basename(absolute_path))
+        )
+        if os.path.islink(canonical_path):
+            raise VaultLockError("Vault file aliases are not supported.")
+        try:
+            if os.stat(canonical_path).st_nlink != 1:
+                raise VaultLockError("Hard-linked vault files are not supported.")
+        except FileNotFoundError:
+            pass
+        lock_path = canonical_path + ".lock"
+        if os.path.islink(lock_path):
+            raise VaultLockError("Vault lock aliases are not supported.")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_BINARY, 0o600)
+    except OSError as exc:
+        raise VaultLockError("Unable to open the vault transaction lock.") from exc
+
+    acquired = False
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                acquired = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN) and getattr(exc, "winerror", None) != 33:
+                    raise VaultLockError("Unable to acquire the vault transaction lock.") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise VaultLockError("Timed out waiting for the vault transaction lock.") from exc
+                time.sleep(min(0.05, remaining))
+        yield
+    finally:
+        try:
+            if acquired:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
 
 
 def _derive_key(master_password, salt):
@@ -84,10 +160,12 @@ def decrypt_payload(envelope, master_password):
         raise VaultCryptoError("Unable to unlock vault. Check the master password or file integrity.") from exc
 
 
-def save_encrypted_file(path, payload, master_password):
-    """Write an encrypted vault atomically, creating its parent directory."""
-    parent = os.path.dirname(os.path.abspath(path))
-    os.makedirs(parent, exist_ok=True)
+def save_encrypted_file(path, payload, master_password, *, overwrite=True):
+    """Write encrypted data; exports may use an atomic no-overwrite commit."""
+    requested_parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(requested_parent, exist_ok=True)
+    # Pin the staging directory when a backup path may traverse a mutable alias.
+    parent = requested_parent if overwrite else os.path.realpath(requested_parent)
     envelope = encrypt_payload(payload, master_password)
     fd, temp_path = tempfile.mkstemp(prefix=".vault-", suffix=".tmp", dir=parent, text=True)
     try:
@@ -95,7 +173,18 @@ def save_encrypted_file(path, payload, master_password):
             json.dump(envelope, file, indent=2)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temp_path, path)
+        if overwrite:
+            os.replace(temp_path, path)
+        elif os.name == "nt":
+            # Windows rename refuses an existing destination and moves the
+            # staged file in one step, so a crash cannot leave a second hard
+            # link to a newly restored live vault.
+            os.rename(temp_path, path)
+        else:
+            # POSIX rename may replace an existing destination. Link creation
+            # fails atomically if it already exists, even after an alias swap.
+            os.link(temp_path, path)
+            os.unlink(temp_path)
         # On platforms that support directory handles, also flush the rename.
         # Windows may reject opening a directory; the atomic replace remains the
         # safe fallback there and the exception is intentionally non-fatal.

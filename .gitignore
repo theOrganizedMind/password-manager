@@ -13,6 +13,7 @@ commit_message.txt
 password_data.json
 public_config.json
 password_data.vault
+.password-vault-initialized
 
 # Project Data Files
 
