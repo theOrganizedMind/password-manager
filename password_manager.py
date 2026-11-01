@@ -204,27 +204,27 @@ class PasswordManagerApp:
         password_var = tk.StringVar()
         notes_var = tk.StringVar()
 
-        ttk.Label(form_frame, text="Employee Name").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Label(form_frame, text="Employee Name").grid(row=0, column=0, sticky="e", padx=(2, 3), pady=3)
         employee_combo = ttk.Combobox(form_frame, textvariable=employee_var, width=30)
-        employee_combo.grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        employee_combo.grid(row=0, column=1, sticky="we", padx=(0, 10), pady=3)
         self._bind_employee_autocomplete(employee_combo, employee_var, include_inactive=False)
 
-        ttk.Label(form_frame, text="Account Name").grid(row=0, column=2, sticky="w", padx=5, pady=5)
-        ttk.Entry(form_frame, textvariable=account_var, width=30).grid(row=0, column=3, sticky="we", padx=5, pady=5)
+        ttk.Label(form_frame, text="Account Name").grid(row=0, column=2, sticky="e", padx=(2, 3), pady=3)
+        ttk.Entry(form_frame, textvariable=account_var, width=30).grid(row=0, column=3, sticky="we", padx=(0, 10), pady=3)
 
-        ttk.Label(form_frame, text="Username").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(form_frame, textvariable=username_var, width=30).grid(row=1, column=1, sticky="we", padx=5, pady=5)
+        ttk.Label(form_frame, text="Username").grid(row=1, column=0, sticky="e", padx=(2, 3), pady=3)
+        ttk.Entry(form_frame, textvariable=username_var, width=30).grid(row=1, column=1, sticky="we", padx=(0, 10), pady=3)
 
         if category_key == "mobile_devices":
-            ttk.Label(form_frame, text="Phone Number").grid(row=1, column=2, sticky="w", padx=5, pady=5)
-            ttk.Entry(form_frame, textvariable=phone_var, width=30).grid(row=1, column=3, sticky="we", padx=5, pady=5)
+            ttk.Label(form_frame, text="Phone Number").grid(row=1, column=2, sticky="e", padx=(2, 3), pady=3)
+            ttk.Entry(form_frame, textvariable=phone_var, width=30).grid(row=1, column=3, sticky="we", padx=(0, 10), pady=3)
 
-        ttk.Label(form_frame, text="Website URL").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(form_frame, textvariable=website_var, width=30).grid(row=2, column=1, sticky="we", padx=5, pady=5)
+        ttk.Label(form_frame, text="Website URL").grid(row=2, column=0, sticky="e", padx=(2, 3), pady=3)
+        ttk.Entry(form_frame, textvariable=website_var, width=30).grid(row=2, column=1, sticky="we", padx=(0, 10), pady=3)
 
-        ttk.Label(form_frame, text="Password").grid(row=2, column=2, sticky="w", padx=5, pady=5)
+        ttk.Label(form_frame, text="Password").grid(row=2, column=2, sticky="e", padx=(2, 3), pady=3)
         password_entry = ttk.Entry(form_frame, textvariable=password_var, width=30, show="•")
-        password_entry.grid(row=2, column=3, sticky="we", padx=5, pady=5)
+        password_entry.grid(row=2, column=3, sticky="we", padx=(0, 6), pady=3)
         show_password_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             form_frame,
@@ -233,13 +233,16 @@ class PasswordManagerApp:
             command=lambda entry=password_entry, flag=show_password_var: entry.configure(
                 show="" if flag.get() else "•"
             ),
-        ).grid(row=2, column=4, sticky="w", padx=5, pady=5)
+        ).grid(row=2, column=4, sticky="w", padx=(0, 0), pady=3)
 
-        ttk.Label(form_frame, text="Notes").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(form_frame, textvariable=notes_var, width=90).grid(row=3, column=1, columnspan=3, sticky="we", padx=5, pady=5)
+        ttk.Label(form_frame, text="Notes").grid(row=3, column=0, sticky="e", padx=(2, 3), pady=3)
+        ttk.Entry(form_frame, textvariable=notes_var, width=90).grid(row=3, column=1, columnspan=3, sticky="we", padx=(0, 10), pady=3)
 
-        for col in range(4):
-            form_frame.columnconfigure(col, weight=1)
+        form_frame.columnconfigure(0, weight=0)
+        form_frame.columnconfigure(1, weight=1)
+        form_frame.columnconfigure(2, weight=0)
+        form_frame.columnconfigure(3, weight=1)
+        form_frame.columnconfigure(4, weight=0)
 
         button_frame = ttk.Frame(container)
         button_frame.pack(fill="x", pady=(6, 8))
