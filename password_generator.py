@@ -23,6 +23,7 @@ DEFAULT_PASSWORD_SETTINGS = {
     "letters_count": 12,
     "capitalize_words": True,
     "reminder_days": 90,
+    "high_security_mode": True,
 }
 SUPPORTED_FORMATS = {
     "word_symbol_word_numbers",
@@ -108,32 +109,33 @@ def _normalize_reminder_days(value):
     return DEFAULT_PASSWORD_SETTINGS["reminder_days"]
 
 
+def _coerce_bool(value, default_value):
+    """Convert known boolean-like values to bool, else return default."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return default_value
+
+
 def _resolve_word_list_path():
-    """Resolve the word list file path from config fallbacks in priority order."""
-    private_config = _load_json_file(PRIVATE_CONFIG_PATH)
-    if isinstance(private_config, dict) and private_config.get("word_list_path"):
-        candidate = private_config["word_list_path"]
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(BASE_DIR, candidate)
-        if os.path.exists(candidate):
-            return candidate
+    """Resolve private or public word-list path based on json_files directory presence."""
+    private_word_list_dir = os.path.dirname(DEFAULT_PRIVATE_WORD_LIST_PATH)
+    if os.path.isdir(private_word_list_dir):
+        if os.path.exists(DEFAULT_PRIVATE_WORD_LIST_PATH):
+            return DEFAULT_PRIVATE_WORD_LIST_PATH
+        raise FileNotFoundError(
+            "Private word list file not found. Expected json_files/word_list.json."
+        )
 
-    public_config = _load_json_file(PUBLIC_CONFIG_PATH)
-    if isinstance(public_config, dict) and public_config.get("word_list_path"):
-        candidate = public_config["word_list_path"]
-        if not os.path.isabs(candidate):
-            candidate = os.path.join(BASE_DIR, candidate)
-        if os.path.exists(candidate):
-            return candidate
-
-    if os.path.exists(DEFAULT_PRIVATE_WORD_LIST_PATH):
-        return DEFAULT_PRIVATE_WORD_LIST_PATH
     if os.path.exists(DEFAULT_PUBLIC_WORD_LIST_PATH):
         return DEFAULT_PUBLIC_WORD_LIST_PATH
 
-    raise FileNotFoundError(
-        "No word list source found. Expected private/public config or word_list.json files."
-    )
+    raise FileNotFoundError("Public word list file not found. Expected word_list.json.")
 
 
 def load_word_list():
@@ -177,6 +179,10 @@ def get_password_settings():
     settings["letters_count"] = _coerce_positive_int(raw_settings.get("letters_count"), settings["letters_count"])
     settings["capitalize_words"] = bool(raw_settings.get("capitalize_words", settings["capitalize_words"]))
     settings["reminder_days"] = _normalize_reminder_days(raw_settings.get("reminder_days", settings["reminder_days"]))
+    settings["high_security_mode"] = _coerce_bool(
+        raw_settings.get("high_security_mode"),
+        settings["high_security_mode"],
+    )
     return settings
 
 
@@ -197,14 +203,15 @@ def _bounded_count(settings, name, minimum, maximum):
 
 
 def _validate_generator_settings(settings, words=None):
-    """Enforce resource limits and a conservative randomness floor."""
+    """Enforce resource limits and optional high-security checks."""
     _bounded_count(settings, "word_count", 1, MAX_WORD_COUNT)
     _bounded_count(settings, "numbers_count", 0, MAX_CHARACTER_COUNT)
     _bounded_count(settings, "symbols_count", 0, MAX_CHARACTER_COUNT)
     _bounded_count(settings, "letters_count", 1, MAX_CHARACTER_COUNT)
+    high_security_mode = bool(settings.get("high_security_mode", True))
 
     if settings["format"] == "scrambled":
-        if settings["letters_count"] < MIN_SCRAMBLED_LETTERS:
+        if high_security_mode and settings["letters_count"] < MIN_SCRAMBLED_LETTERS:
             raise ValueError(f"Scrambled passwords require at least {MIN_SCRAMBLED_LETTERS} letters.")
         return
 
@@ -214,6 +221,8 @@ def _validate_generator_settings(settings, words=None):
         raise ValueError("Word formats require at least 2 words.")
     if words is None:
         raise ValueError("Word list is required for word formats.")
+    if not high_security_mode:
+        return
 
     # Count only choices that remain distinct in the visible password. ASCII
     # letters keep word tokens separate from digit and punctuation choices;
@@ -268,6 +277,10 @@ def update_password_settings(new_settings):
 
     merged["format"] = selected_format
     merged["capitalize_words"] = bool(merged.get("capitalize_words", True))
+    merged["high_security_mode"] = _coerce_bool(
+        merged.get("high_security_mode"),
+        DEFAULT_PASSWORD_SETTINGS["high_security_mode"],
+    )
     merged["reminder_days"] = _normalize_reminder_days(
         merged.get("reminder_days", DEFAULT_PASSWORD_SETTINGS["reminder_days"])
     )

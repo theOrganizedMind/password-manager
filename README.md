@@ -15,6 +15,8 @@ application.
 - Passwords masked in the table and form until the owner chooses **Show**
 - Employee Name autocomplete/dropdown suggestions while typing in tab forms
 - Password generation using Python's cryptographically secure `secrets` module
+- Word-list source selection: if `json_files/` exists, use `json_files/word_list.json`; otherwise use `word_list.json`
+- Settings option to enable/disable high-security word-list validation rules
 - Encrypted per-category and full-vault backups using AES-256-GCM and scrypt
 - Encrypted backup imports can use the backup's own master password when it
   differs from the currently open vault password. Import refuses any account

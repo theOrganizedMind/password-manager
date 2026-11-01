@@ -179,7 +179,8 @@ class PasswordManagerApp:
 
     def refresh_employee_autocomplete_values(self):
         """Refresh employee-name option lists for all tabs."""
-        for tab in self.tabs.values():
+        tabs = getattr(self, "tabs", {})
+        for tab in tabs.values():
             employee_combo = tab.get("employee_combo")
             if employee_combo:
                 employee_combo.configure(values=())
@@ -975,6 +976,7 @@ class PasswordManagerApp:
             "letters_count": tk.StringVar(value="12"),
             "reminder_days": tk.StringVar(value="90"),
             "capitalize_words": tk.BooleanVar(value=True),
+            "high_security_mode": tk.BooleanVar(value=True),
         }
 
         ttk.Label(form, text="Format").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -1011,7 +1013,14 @@ class PasswordManagerApp:
         )
         self.capitalize_check.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=(8, 5))
 
-        ttk.Label(form, text="Reminder Days").grid(row=6, column=0, sticky="w", padx=5, pady=5)
+        self.high_security_check = ttk.Checkbutton(
+            form,
+            text="Enable High Security Word-List Rules",
+            variable=self.settings_vars["high_security_mode"],
+        )
+        self.high_security_check.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=(2, 5))
+
+        ttk.Label(form, text="Reminder Days").grid(row=7, column=0, sticky="w", padx=5, pady=5)
         reminder_combo = ttk.Combobox(
             form,
             textvariable=self.settings_vars["reminder_days"],
@@ -1019,7 +1028,7 @@ class PasswordManagerApp:
             values=("30", "60", "90", "Off"),
             width=12,
         )
-        reminder_combo.grid(row=6, column=1, sticky="w", padx=5, pady=5)
+        reminder_combo.grid(row=7, column=1, sticky="w", padx=5, pady=5)
 
         help_text = (
             "Format examples:\n"
@@ -1027,7 +1036,7 @@ class PasswordManagerApp:
             "- word_number_chunks: Word76Word64word23\n"
             "- scrambled: wd}o75(rrod$w8"
         )
-        ttk.Label(form, text=help_text, justify="left").grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=(8, 0))
+        ttk.Label(form, text=help_text, justify="left").grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=(8, 0))
 
         employee_frame = ttk.LabelFrame(container, text="Employee Status", padding=12)
         employee_frame.pack(fill="x", pady=(0, 10))
@@ -1189,6 +1198,7 @@ class PasswordManagerApp:
         self.settings_vars["symbols_count"].set(str(settings["symbols_count"]))
         self.settings_vars["letters_count"].set(str(settings["letters_count"]))
         self.settings_vars["capitalize_words"].set(bool(settings["capitalize_words"]))
+        self.settings_vars["high_security_mode"].set(bool(settings.get("high_security_mode", True)))
         reminder_days = settings.get("reminder_days", 90)
         self.settings_vars["reminder_days"].set(
             "Off" if str(reminder_days).lower() == "off" else str(reminder_days)
@@ -1209,6 +1219,7 @@ class PasswordManagerApp:
                 "symbols_count": int(self.settings_vars["symbols_count"].get().strip()),
                 "letters_count": int(self.settings_vars["letters_count"].get().strip()),
                 "capitalize_words": bool(self.settings_vars["capitalize_words"].get()),
+                "high_security_mode": bool(self.settings_vars["high_security_mode"].get()),
                 "reminder_days": "off" if reminder_raw.lower() == "off" else int(reminder_raw),
             }
         except ValueError:
@@ -1231,12 +1242,21 @@ class PasswordManagerApp:
         try:
             saved = password_generator.update_password_settings(payload)
         except ValueError:
+            if payload["high_security_mode"]:
+                details = (
+                    "These settings could make a weak or excessively large password. "
+                    "Use at least 12 scrambled letters, or increase the words, digits, "
+                    "and symbols for a word-based password. Limits: 16 words and "
+                    "128 letters, digits, or symbols."
+                )
+            else:
+                details = (
+                    "These settings are invalid for the selected format. "
+                    "Check counts, format, and word list data."
+                )
             messagebox.showerror(
                 "Invalid Settings",
-                "These settings could make a weak or excessively large password. "
-                "Use at least 12 scrambled letters, or increase the words, digits, "
-                "and symbols for a word-based password. Limits: 16 words and "
-                "128 letters, digits, or symbols.",
+                details,
             )
             return
         except Exception as exc:
