@@ -74,6 +74,7 @@ GENERATOR_GUIDANCE = (
     "Use at least 12 scrambled letters, or choose a valid alphabetic word list "
     "and enough words, digits, and symbols. Review Settings before retrying."
 )
+MIN_EMPLOYEE_AUTOCOMPLETE_CHARS = 5
 
 BASE_FIELDS = ["employee_name", "account_name", "username", "account_password", "notes"]
 EXPORT_HEADERS = {
@@ -103,6 +104,8 @@ class PasswordManagerApp:
         self.settings_vars = {}
         self.settings_status_var = tk.StringVar(value="")
         self.reminder_description_var = tk.StringVar(value="")
+        self.settings_employee_var = tk.StringVar(value="")
+        self.employee_status_var = tk.StringVar(value="")
 
         self.build_ui()
         self.load_all_tabs()
@@ -140,6 +143,50 @@ class PasswordManagerApp:
         self.build_reminder_tab(self.tab_reminders)
         self.build_settings_tab(self.tab_settings)
 
+    @staticmethod
+    def _normalize_employee_name(employee_name):
+        """Normalize employee name for status and lookup comparisons."""
+        return str(employee_name).strip().casefold()
+
+    def _is_employee_active(self, employee_name, activity_map=None):
+        """Return whether an employee is active, defaulting to active when unknown."""
+        employee_key = self._normalize_employee_name(employee_name)
+        if not employee_key:
+            return True
+        if activity_map is None:
+            activity_map = self.storage.fetch_employee_activity_map()
+        return activity_map.get(employee_key, True)
+
+    def _bind_employee_autocomplete(self, combo, var, include_inactive):
+        """Attach dynamic employee-name suggestions for combobox typing."""
+        def apply_suggestions(show_dropdown):
+            query = var.get().strip()
+            if len(query) < MIN_EMPLOYEE_AUTOCOMPLETE_CHARS:
+                combo.configure(values=())
+                return
+            suggestions = self.storage.fetch_employee_names(
+                query=query,
+                include_inactive=include_inactive,
+            )
+            combo.configure(values=suggestions)
+            if show_dropdown and query and suggestions:
+                combo.event_generate("<Down>")
+
+        combo.bind("<KeyRelease>", lambda _event: apply_suggestions(show_dropdown=True))
+        combo.bind("<Button-1>", lambda _event: apply_suggestions(show_dropdown=False))
+        combo.bind("<<ComboboxSelected>>", lambda _event: apply_suggestions(show_dropdown=False))
+        apply_suggestions(show_dropdown=False)
+
+    def refresh_employee_autocomplete_values(self):
+        """Refresh employee-name option lists for all tabs."""
+        for tab in self.tabs.values():
+            employee_combo = tab.get("employee_combo")
+            if employee_combo:
+                employee_combo.configure(values=())
+
+        if hasattr(self, "settings_employee_combo"):
+            self.settings_employee_combo.configure(values=())
+
     def build_tab(self, parent, category_key, category_label):
         """Create one account-management tab with form, action buttons, and results table."""
         container = ttk.Frame(parent, padding=10)
@@ -157,7 +204,9 @@ class PasswordManagerApp:
         notes_var = tk.StringVar()
 
         ttk.Label(form_frame, text="Employee Name").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        ttk.Entry(form_frame, textvariable=employee_var, width=30).grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        employee_combo = ttk.Combobox(form_frame, textvariable=employee_var, width=30)
+        employee_combo.grid(row=0, column=1, sticky="we", padx=5, pady=5)
+        self._bind_employee_autocomplete(employee_combo, employee_var, include_inactive=False)
 
         ttk.Label(form_frame, text="Account Name").grid(row=0, column=2, sticky="w", padx=5, pady=5)
         ttk.Entry(form_frame, textvariable=account_var, width=30).grid(row=0, column=3, sticky="we", padx=5, pady=5)
@@ -258,6 +307,7 @@ class PasswordManagerApp:
             "notes_var": notes_var,
             "password_entry": password_entry,
             "show_password_var": show_password_var,
+            "employee_combo": employee_combo,
             "tree": tree,
             "selected_id": None,
             "selected_snapshot": None,
@@ -307,6 +357,7 @@ class PasswordManagerApp:
         """Load records into all account tabs."""
         for category_key in self.tabs:
             self.load_tab_data(category_key)
+        self.refresh_employee_autocomplete_values()
 
     def load_tab_data(self, category_key, search_filters=None):
         """Populate one account tab Treeview, optionally filtered by supported fields."""
@@ -316,7 +367,10 @@ class PasswordManagerApp:
             tree.delete(item_id)
 
         records = self.storage.fetch_records(category_key, search_filters=search_filters)
+        employee_activity = self.storage.fetch_employee_activity_map()
         for row in records:
+            if not self._is_employee_active(row.get("employee_name", ""), employee_activity):
+                continue
             row_values = [
                 row["employee_name"],
                 row["account_name"],
@@ -349,8 +403,11 @@ class PasswordManagerApp:
         if reminder_days is None:
             return
 
+        employee_activity = self.storage.fetch_employee_activity_map()
         due_records = self.storage.fetch_all_due_password_reminders(days=reminder_days)
         for record in due_records:
+            if not self._is_employee_active(record.get("employee_name", ""), employee_activity):
+                continue
             self.reminder_tree.insert(
                 "",
                 "end",
@@ -383,6 +440,9 @@ class PasswordManagerApp:
             self.clear_fields(category_key)
             return
         if not record:
+            self.clear_fields(category_key)
+            return
+        if not self._is_employee_active(record.get("employee_name", "")):
             self.clear_fields(category_key)
             return
 
@@ -476,11 +536,18 @@ class PasswordManagerApp:
         payload = self.read_form(category_key)
         if not self.validate_required_fields(payload):
             return
+        if not self._is_employee_active(payload.get("employee_name", "")):
+            messagebox.showwarning(
+                "Employee Deactivated",
+                "Activate this employee in Settings before adding records.",
+            )
+            return
 
         try:
             self.storage.add_record(category_key, payload)
             self.load_tab_data(category_key)
             self.refresh_reminder_tab()
+            self.refresh_employee_autocomplete_values()
             self.clear_fields(category_key)
             messagebox.showinfo("Added", "Record added successfully.")
         except ValueError as exc:
@@ -503,6 +570,12 @@ class PasswordManagerApp:
         payload = self.read_form(category_key)
         if not self.validate_required_fields(payload):
             return
+        if not self._is_employee_active(payload.get("employee_name", "")):
+            messagebox.showwarning(
+                "Employee Deactivated",
+                "Activate this employee in Settings before updating records.",
+            )
+            return
 
         try:
             self.storage.update_record(
@@ -511,6 +584,7 @@ class PasswordManagerApp:
             )
             self.load_tab_data(category_key)
             self.refresh_reminder_tab()
+            self.refresh_employee_autocomplete_values()
             self.clear_fields(category_key)
             messagebox.showinfo("Updated", "Record updated successfully.")
         except RecordConflictError:
@@ -543,6 +617,7 @@ class PasswordManagerApp:
             )
             self.load_tab_data(category_key)
             self.refresh_reminder_tab()
+            self.refresh_employee_autocomplete_values()
             self.clear_fields(category_key)
             messagebox.showinfo("Deleted", "Record deleted successfully.")
         except RecordConflictError:
@@ -624,6 +699,7 @@ class PasswordManagerApp:
                 imported, skipped = self.storage.import_records_from_file(category_key, file_path)
             self.load_tab_data(category_key)
             self.refresh_reminder_tab()
+            self.refresh_employee_autocomplete_values()
             messagebox.showinfo(
                 "Import Complete",
                 f"Imported: {imported}\nSkipped invalid rows: {skipped}",
@@ -744,6 +820,7 @@ class PasswordManagerApp:
                 summary = self.storage.import_all_records_from_file(file_path)
             self.load_all_tabs()
             self.refresh_reminder_tab()
+            self.refresh_employee_autocomplete_values()
             messagebox.showinfo(
                 "Import Complete",
                 (
@@ -844,9 +921,14 @@ class PasswordManagerApp:
         if not due_records:
             return
 
+        employee_activity = self.storage.fetch_employee_activity_map()
         counts = {label: 0 for label in CATEGORY_LABELS.values()}
         for row in due_records:
+            if not self._is_employee_active(row.get("employee_name", ""), employee_activity):
+                continue
             counts[row["category_label"]] += 1
+        if sum(counts.values()) == 0:
+            return
 
         summary_lines = [f"{label}: {counts[label]} due" for label in CATEGORY_LABELS.values()]
 
@@ -947,6 +1029,49 @@ class PasswordManagerApp:
         )
         ttk.Label(form, text=help_text, justify="left").grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=(8, 0))
 
+        employee_frame = ttk.LabelFrame(container, text="Employee Status", padding=12)
+        employee_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(employee_frame, text="Employee Name").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.settings_employee_combo = ttk.Combobox(
+            employee_frame,
+            textvariable=self.settings_employee_var,
+            width=25,
+        )
+        self.settings_employee_combo.grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        self._bind_employee_autocomplete(
+            self.settings_employee_combo,
+            self.settings_employee_var,
+            include_inactive=True,
+        )
+
+        ttk.Button(
+            employee_frame,
+            text="Search",
+            command=self.search_employee_for_settings,
+        ).grid(row=0, column=2, sticky="w", padx=5, pady=5)
+        action_button_row = ttk.Frame(employee_frame)
+        action_button_row.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        ttk.Button(
+            action_button_row,
+            text="Activate",
+            command=lambda: self.set_employee_active_state(True),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            action_button_row,
+            text="Deactivate",
+            command=lambda: self.set_employee_active_state(False),
+        ).pack(side="left")
+        ttk.Button(
+            action_button_row,
+            text="Clear",
+            command=self.clear_settings_employee_field,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(employee_frame, textvariable=self.employee_status_var).grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=5, pady=(6, 0)
+        )
+        employee_frame.columnconfigure(1, weight=0)
+
         button_bar = ttk.Frame(container)
         button_bar.pack(fill="x", pady=(4, 6))
 
@@ -962,6 +1087,89 @@ class PasswordManagerApp:
         ttk.Entry(preview_frame, textvariable=self.settings_preview_var, width=70, state="readonly").pack(fill="x", padx=4, pady=4)
 
         self.load_settings_form()
+        self.refresh_employee_autocomplete_values()
+
+    def search_employee_for_settings(self):
+        """Locate employees by name fragment and show their active state."""
+        query = self.settings_employee_var.get().strip()
+        if not query:
+            messagebox.showwarning("Employee Name Required", "Enter an employee name to search.")
+            return
+        if len(query) < MIN_EMPLOYEE_AUTOCOMPLETE_CHARS:
+            messagebox.showwarning(
+                "Employee Name Required",
+                f"Enter at least {MIN_EMPLOYEE_AUTOCOMPLETE_CHARS} letters to search.",
+            )
+            return
+
+        matches = self.storage.search_employees(query)
+        if not matches:
+            self.employee_status_var.set("No matching employee found.")
+            messagebox.showinfo("No Match", "No employee matched the search value.")
+            return
+
+        exact_match = next(
+            (
+                row for row in matches
+                if self._normalize_employee_name(row["employee_name"]) == self._normalize_employee_name(query)
+            ),
+            None,
+        )
+        selected = exact_match or matches[0]
+        employee_name = selected["employee_name"]
+        self.settings_employee_var.set(employee_name)
+        self.employee_status_var.set(
+            f"{employee_name} is currently {'Active' if selected['active'] else 'Deactivated'}."
+        )
+
+        if len(matches) > 1 and exact_match is None:
+            preview_names = ", ".join(row["employee_name"] for row in matches[:5])
+            messagebox.showinfo(
+                "Multiple Matches",
+                f"Found {len(matches)} employees. Selected: {employee_name}\nTop matches: {preview_names}",
+            )
+
+    def clear_settings_employee_field(self):
+        """Clear the Settings employee search field and reset autocomplete values."""
+        self.settings_employee_var.set("")
+        if hasattr(self, "settings_employee_combo"):
+            self.settings_employee_combo.configure(values=())
+
+    def set_employee_active_state(self, is_active):
+        """Activate or deactivate an employee and refresh visible records."""
+        employee_name = self.settings_employee_var.get().strip()
+        if not employee_name:
+            messagebox.showwarning("Employee Name Required", "Enter or search an employee name first.")
+            return
+
+        try:
+            resolved_name = self.storage.set_employee_active(employee_name, is_active)
+        except ValueError as exc:
+            messagebox.showwarning("Employee Not Found", str(exc))
+            self.clear_settings_employee_field()
+            return
+        except Exception as exc:
+            self.handle_ui_exception(
+                "Employee Update Error",
+                "Unable to update employee status. Retry after reopening the vault.",
+                "set_employee_active_state",
+                exc,
+            )
+            self.clear_settings_employee_field()
+            return
+
+        self.settings_employee_var.set(resolved_name)
+        self.employee_status_var.set(
+            f"{resolved_name} is now {'Active' if is_active else 'Deactivated'}."
+        )
+        self.load_all_tabs()
+        self.refresh_reminder_tab()
+        self.refresh_employee_autocomplete_values()
+        messagebox.showinfo(
+            "Employee Updated",
+            f"{resolved_name} is now {'active' if is_active else 'deactivated'}.",
+        )
+        self.clear_settings_employee_field()
 
     def _toggle_settings_fields(self):
         """Enable or disable fields based on selected password format."""
@@ -986,7 +1194,9 @@ class PasswordManagerApp:
             "Off" if str(reminder_days).lower() == "off" else str(reminder_days)
         )
         self.settings_status_var.set("Settings loaded")
+        self.employee_status_var.set("")
         self._toggle_settings_fields()
+        self.refresh_employee_autocomplete_values()
 
     def save_settings_from_form(self):
         """Validate and persist generator settings from the UI form."""
@@ -1080,7 +1290,7 @@ class StorageManager:
                 category_key in backup for category_key in CATEGORY_LABELS
             ):
                 raise VaultCryptoError("Recovery requires a full backup with every category.")
-            if set(backup) - (set(CATEGORY_LABELS) | {"exported_at"}):
+            if set(backup) - (set(CATEGORY_LABELS) | {"exported_at", "employee_statuses"}):
                 raise VaultCryptoError("The full backup contains unsupported fields; no data was restored.")
 
             payload = {}
@@ -1100,6 +1310,8 @@ class StorageManager:
                     if type(raw_id) is int and raw_id > max_id:
                         max_id = raw_id
             payload["next_id"] = max_id + 1
+            if "employee_statuses" in backup:
+                payload["employee_statuses"] = backup["employee_statuses"]
             cls._validate_json_payload(payload)
             try:
                 save_encrypted_file(vault_path, payload, master_password, overwrite=False)
@@ -1165,6 +1377,7 @@ class StorageManager:
                 "mobile_devices": [],
                 "computers": [],
                 "admin": [],
+                "employee_statuses": {},
                 "next_id": 1,
             }
             save_encrypted_file(self.json_store_path, seed, self.master_password)
@@ -1187,6 +1400,9 @@ class StorageManager:
 
         if "next_id" not in existing:
             existing["next_id"] = 1
+            changed = True
+        if "employee_statuses" not in existing:
+            existing["employee_statuses"] = {}
             changed = True
 
         self._validate_json_payload(existing)
@@ -1250,9 +1466,69 @@ class StorageManager:
                     if field in record and not isinstance(record[field], str):
                         raise VaultCryptoError("The encrypted vault contains an invalid record.")
 
+        employee_statuses = payload.get("employee_statuses", {})
+        if not isinstance(employee_statuses, dict):
+            raise VaultCryptoError("The encrypted vault contains invalid employee status data.")
+        for employee_key, status_record in employee_statuses.items():
+            if not isinstance(employee_key, str) or not employee_key.strip():
+                raise VaultCryptoError("The encrypted vault contains invalid employee status data.")
+            if not isinstance(status_record, dict):
+                raise VaultCryptoError("The encrypted vault contains invalid employee status data.")
+            employee_name = status_record.get("employee_name")
+            if not isinstance(employee_name, str) or not employee_name.strip():
+                raise VaultCryptoError("The encrypted vault contains invalid employee status data.")
+            active = status_record.get("active")
+            if not isinstance(active, bool):
+                raise VaultCryptoError("The encrypted vault contains invalid employee status data.")
+
         next_id = payload.get("next_id")
         if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id <= max_id:
             raise VaultCryptoError("The encrypted vault has an invalid next record ID.")
+
+    @staticmethod
+    def _normalize_employee_name(employee_name):
+        """Normalize employee names for stable lookups."""
+        return str(employee_name).strip().casefold()
+
+    def _employee_name_index_from_data(self, data):
+        """Build a normalized employee-name index from records and saved status entries."""
+        names_by_key = {}
+        for category_key in CATEGORY_LABELS:
+            for record in data.get(category_key, []):
+                employee_name = str(record.get("employee_name", "")).strip()
+                if not employee_name:
+                    continue
+                employee_key = self._normalize_employee_name(employee_name)
+                if employee_key and employee_key not in names_by_key:
+                    names_by_key[employee_key] = employee_name
+
+        employee_statuses = data.get("employee_statuses", {})
+        for employee_key, status_record in employee_statuses.items():
+            if not isinstance(status_record, dict):
+                continue
+            employee_name = status_record.get("employee_name")
+            if not isinstance(employee_name, str) or not employee_name.strip():
+                continue
+            normalized_key = self._normalize_employee_name(employee_key)
+            if normalized_key and normalized_key not in names_by_key:
+                names_by_key[normalized_key] = employee_name.strip()
+
+        return names_by_key
+
+    def _employee_activity_map_from_data(self, data):
+        """Return normalized employee activity state, defaulting unknowns to active."""
+        names_by_key = self._employee_name_index_from_data(data)
+        activity_by_key = {employee_key: True for employee_key in names_by_key}
+
+        employee_statuses = data.get("employee_statuses", {})
+        for employee_key, status_record in employee_statuses.items():
+            if not isinstance(status_record, dict):
+                continue
+            normalized_key = self._normalize_employee_name(employee_key)
+            if normalized_key in activity_by_key:
+                activity_by_key[normalized_key] = bool(status_record.get("active", True))
+
+        return activity_by_key
 
     def _load_json(self):
         """Load and validate; never recreate a vault that vanished after unlock."""
@@ -1277,6 +1553,70 @@ class StorageManager:
             if int(record.get("password_id")) == int(password_id):
                 return record
         return None
+
+    def fetch_employee_activity_map(self):
+        """Fetch employee activity states keyed by normalized employee name."""
+        data = self._load_json()
+        return self._employee_activity_map_from_data(data)
+
+    def fetch_employee_names(self, query="", include_inactive=True):
+        """Fetch sorted employee names, optionally filtered to active employees only."""
+        query_text = str(query).strip().casefold()
+        data = self._load_json()
+        names_by_key = self._employee_name_index_from_data(data)
+        activity_by_key = self._employee_activity_map_from_data(data)
+
+        names = []
+        for employee_key, employee_name in names_by_key.items():
+            if not include_inactive and not activity_by_key.get(employee_key, True):
+                continue
+            if query_text and query_text not in employee_name.casefold():
+                continue
+            names.append(employee_name)
+
+        return sorted(names, key=str.casefold)
+
+    def search_employees(self, query):
+        """Search employees by partial name and include each employee active state."""
+        query_text = str(query).strip().casefold()
+        data = self._load_json()
+        names_by_key = self._employee_name_index_from_data(data)
+        activity_by_key = self._employee_activity_map_from_data(data)
+
+        matches = []
+        for employee_key, employee_name in names_by_key.items():
+            if query_text and query_text not in employee_name.casefold():
+                continue
+            matches.append(
+                {
+                    "employee_name": employee_name,
+                    "active": activity_by_key.get(employee_key, True),
+                }
+            )
+
+        return sorted(matches, key=lambda row: row["employee_name"].casefold())
+
+    def set_employee_active(self, employee_name, is_active):
+        """Persist active/deactivated state for an employee and return the resolved name."""
+        candidate_name = str(employee_name).strip()
+        if not candidate_name:
+            raise ValueError("Employee name is required.")
+        employee_key = self._normalize_employee_name(candidate_name)
+
+        with vault_transaction_lock(self.vault_path):
+            data = self._load_json()
+            names_by_key = self._employee_name_index_from_data(data)
+            if employee_key not in names_by_key:
+                raise ValueError("Employee was not found in vault records.")
+            resolved_name = names_by_key[employee_key]
+            statuses = data.setdefault("employee_statuses", {})
+            statuses[employee_key] = {
+                "employee_name": resolved_name,
+                "active": bool(is_active),
+            }
+            self._save_json(data)
+
+        return resolved_name
 
     def add_record(self, category_key, payload):
         """Add one record to selected category."""
@@ -1366,6 +1706,7 @@ class StorageManager:
                 category_key: [self._serialize_record(row) for row in snapshot[category_key]]
                 for category_key in CATEGORY_LABELS
             }
+            payload["employee_statuses"] = snapshot.get("employee_statuses", {})
         payload["exported_at"] = datetime.now().isoformat(timespec="seconds")
         save_encrypted_file(file_path, payload, self.master_password, overwrite=False)
 
@@ -1468,6 +1809,9 @@ class StorageManager:
         """Validate and atomically import a category-keyed backup payload."""
         grouped_rows = {category_key: [] for category_key in CATEGORY_LABELS}
         seen_ids = set()
+        employee_statuses = payload.get("employee_statuses", {})
+        if not isinstance(employee_statuses, dict):
+            raise ValueError("Full import employee statuses must be an object.")
         for category_key in CATEGORY_LABELS:
             records = payload.get(category_key, [])
             if not isinstance(records, list):
@@ -1479,7 +1823,10 @@ class StorageManager:
                 seen_ids=seen_ids,
             )
             grouped_rows[category_key] = records
-        return self._import_grouped_rows_atomically(grouped_rows)
+        return self._import_grouped_rows_atomically(
+            grouped_rows,
+            imported_employee_statuses=employee_statuses,
+        )
 
     def _reject_conflicting_backup_shapes(self, payload):
         """A backup cannot be both a flat and category-keyed collection."""
@@ -1515,7 +1862,7 @@ class StorageManager:
             if self._normalize_import_row(row) is None:
                 raise ValueError("Full imports require Employee Name, Account Name, Username, and Password.")
 
-    def _import_grouped_rows_atomically(self, grouped_rows):
+    def _import_grouped_rows_atomically(self, grouped_rows, imported_employee_statuses=None):
         """Apply a validated local-vault import in memory and persist it with one save."""
         if self.use_database:
             raise NotImplementedError("Import into PostgreSQL is unsupported in this single-user stage.")
@@ -1532,6 +1879,26 @@ class StorageManager:
                 for normalized in rows:
                     self._json_upsert_record_in_data(data, category_key, normalized)
                     summary[category_key] += 1
+            if imported_employee_statuses is not None:
+                names_by_key = self._employee_name_index_from_data(data)
+                merged_statuses = {}
+                for employee_key, status_record in imported_employee_statuses.items():
+                    if not isinstance(status_record, dict):
+                        continue
+                    normalized_key = self._normalize_employee_name(employee_key)
+                    if normalized_key not in names_by_key:
+                        continue
+                    merged_statuses[normalized_key] = {
+                        "employee_name": names_by_key[normalized_key],
+                        "active": bool(status_record.get("active", True)),
+                    }
+                for employee_key, employee_name in names_by_key.items():
+                    if employee_key not in merged_statuses:
+                        merged_statuses[employee_key] = {
+                            "employee_name": employee_name,
+                            "active": True,
+                        }
+                data["employee_statuses"] = merged_statuses
             self._save_json(data)
             return summary
 
@@ -1831,6 +2198,18 @@ class StorageManager:
             ),
         )
 
+    def _sync_employee_status_entry(self, data, employee_name):
+        """Ensure an employee status row exists and preserves previous active state."""
+        normalized_name = self._normalize_employee_name(employee_name)
+        if not normalized_name:
+            return
+        statuses = data.setdefault("employee_statuses", {})
+        existing = statuses.get(normalized_name, {})
+        statuses[normalized_name] = {
+            "employee_name": str(employee_name).strip(),
+            "active": bool(existing.get("active", True)),
+        }
+
     def _json_add_record(self, category_key, payload):
         """Insert one row while holding the complete vault transaction lock."""
         with vault_transaction_lock(self.vault_path):
@@ -1853,6 +2232,7 @@ class StorageManager:
                 "updated_at": now,
             }
             records.append(new_record)
+            self._sync_employee_status_entry(data, payload["employee_name"])
             data["next_id"] += 1
             self._save_json(data)
 
@@ -1882,6 +2262,7 @@ class StorageManager:
             target["notes"] = payload["notes"]
             target["updated_at"] = datetime.now().isoformat(timespec="seconds")
             target["_revision"] += 1
+            self._sync_employee_status_entry(data, payload["employee_name"])
             self._save_json(data)
 
     def _json_delete_record(self, category_key, password_id, expected_record):
@@ -1932,6 +2313,7 @@ class StorageManager:
                 self._parse_record_datetime(row.get("updated_at"), row.get("created_at")) or datetime.now()
             ).isoformat(timespec="seconds")
             target["_revision"] += 1
+            self._sync_employee_status_entry(data, row["employee_name"])
             return
 
         now = datetime.now()
@@ -1953,6 +2335,7 @@ class StorageManager:
                 "updated_at": updated_at.isoformat(timespec="seconds"),
             }
         )
+        self._sync_employee_status_entry(data, row["employee_name"])
         data["next_id"] += 1
 
     def _json_ensure_not_duplicate(self, records, payload, exclude_id=None):
@@ -2204,7 +2587,8 @@ def main():
     if not os.path.exists(vault_path) and os.path.lexists(initialized_path):
         if not messagebox.askyesno(
             "Vault Missing",
-            "A previously initialized vault is missing. Restore it from a full encrypted backup now? Choose No to exit without modifying or creating a vault.",
+            "A previously initialized vault is missing. Restore it from a full "
+            "encrypted backup now? Choose No to exit without modifying or creating a vault.",
             parent=root,
         ):
             root.destroy()
@@ -2268,7 +2652,8 @@ def main():
                 return
         if len(master_password) < 12:
             if messagebox.askretrycancel(
-                "Password Too Short", "The master password must have at least 12 characters. Retry?", parent=root
+                "Password Too Short", 
+                "The master password must have at least 12 characters. Retry?", parent=root
             ):
                 continue
             root.destroy()
@@ -2296,7 +2681,8 @@ def main():
             return
     _ = app
     if restored_password is not None:
-        messagebox.showinfo("Restore Complete", "The full encrypted backup was restored. Verify the records and create a new backup.", parent=root)
+        messagebox.showinfo("Restore Complete", "The full encrypted backup was restored."
+                            "Verify the records and create a new backup.", parent=root)
     vault_dir = os.path.dirname(vault_path)
     try:
         remnants_present = any(

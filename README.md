@@ -11,7 +11,9 @@ application.
 
 - Password Book, Mobile Devices, Computers, and Admin tabs
 - Add, update, delete, search, and 90-day update reminders
+- Employee activation/deactivation controls in **Settings** with employee-name search
 - Passwords masked in the table and form until the owner chooses **Show**
+- Employee Name autocomplete/dropdown suggestions while typing in tab forms
 - Password generation using Python's cryptographically secure `secrets` module
 - Encrypted per-category and full-vault backups using AES-256-GCM and scrypt
 - Encrypted backup imports can use the backup's own master password when it
